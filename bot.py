@@ -5,20 +5,18 @@ import requests
 import streamlit as st
 from deriv_api import DerivAPI
 from datetime import datetime
-
-# --- CONFIGURATION ---
 import os
 
 # --- CONFIGURATION ---
 APP_ID = 1089
 SYMBOL = 'R_75'
 
-# Try to get the secret from the Cloud, otherwise use a placeholder
+# SECRET MANAGEMENT
+# Checks if running on Cloud (st.secrets) or Local (Placeholder)
 try:
     DISCORD_WEBHOOK_URL = st.secrets["discord_webhook"]
 except:
-    # This keeps it working on your laptop for testing
-    DISCORD_WEBHOOK_URL = "PASTE_YOUR_NEW_WEBHOOK_HERE_FOR_LOCAL_TESTING"
+    DISCORD_WEBHOOK_URL = "PASTE_YOUR_LOCAL_WEBHOOK_HERE_IF_TESTING"
 
 # STRATEGY: Diamond Settings (Row 1)
 Z_TRIGGER = -2.0
@@ -30,8 +28,11 @@ TP_MULT = 9.0
 def log_to_file(msg):
     """Writes a message to a permanent text file"""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with open("bot_history.log", "a") as f:
-        f.write(f"[{timestamp}] {msg}\n")
+    try:
+        with open("bot_history.log", "a") as f:
+            f.write(f"[{timestamp}] {msg}\n")
+    except:
+        pass # Ignore log errors on cloud if permission denied
 
 # --- MATH ENGINE ---
 class SyntheticMathEngine:
@@ -133,68 +134,72 @@ def send_discord_alert(state, symbol):
 st.set_page_config(page_title=f"Bot {SYMBOL}", layout="wide")
 st.title(f"💎 {SYMBOL} Diamond Logger")
 
+# Auto-Start Logic: No Button needed anymore
+if "running" not in st.session_state:
+    st.session_state.running = True
+    log_to_file("Bot Auto-Started on Server.")
+
 m1, m2, m3, m4 = st.columns(4)
 with m1: st.metric("Settings", "Diamond (Row 1)")
 with m2: st.metric("Risk", "1:3 Ratio")
 with m3: st.metric("Stop Loss", "3.0 ATR")
-with m4: st.metric("Status", "Logging Active")
+with m4: st.metric("Status", "🟢 AUTO-RUNNING")
 
-if st.button("Start Scanner"):
-    st.write("--- Scanner Active ---")
-    log_to_file("Bot Started. Scanner Active.") # Log start
-    
-    board = st.empty()
-    last_signal_time = 0
-    
-    while True:
-        prices = asyncio.run(fetch_data())
-        
-        with board.container():
-            if len(prices) > 100:
-                engine = SyntheticMathEngine(prices)
-                state, z, er, p = engine.analyze_market_state()
-                
-                # STATUS
-                st.markdown(f"## STATUS: :{state['color']}[{state['status']}]")
-                
-                # METRICS
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Z-Score", f"{z:.2f}", delta="Trigger -2.0")
-                c2.metric("Efficiency", f"{er:.2f}", delta="Filter 0.4")
-                c3.metric("Price", f"{p:.2f}")
-                st.divider()
-                
-                # SIGNAL LOGIC
-                if state["signal"]:
-                    st.error("⚡ **OPPORTUNITY DETECTED**")
-                    
-                    b_col, s_col = st.columns(2)
-                    with b_col:
-                        st.info("🔵 **BUY STOP**")
-                        st.code(f"Entry: {state['buy_entry']:.2f}\nSL:    {state['buy_sl']:.2f}\nTP:    {state['buy_tp']:.2f}")
-                    with s_col:
-                        st.warning("🔴 **SELL STOP**")
-                        st.code(f"Entry: {state['sell_entry']:.2f}\nSL:    {state['sell_sl']:.2f}\nTP:    {state['sell_tp']:.2f}")
-                    
-                    import time
-                    if time.time() - last_signal_time > 300: 
-                        # 1. Send Discord
-                        send_discord_alert(state, SYMBOL)
-                        
-                        # 2. Log to File
-                        log_msg = f"SIGNAL FIRED | Price: {p} | Buy: {state['buy_entry']:.2f} | Sell: {state['sell_entry']:.2f} | Z: {z:.2f}"
-                        log_to_file(log_msg)
-                        
-                        st.toast("Signal Logged to bot_history.log")
-                        last_signal_time = time.time()
-                
-                elif state["status"] == "⚠️ PRE-SQUEEZE":
-                    st.warning(f"**Watchlist:** {state['message']}")
-                else:
-                    st.info("Scanning...")
+# Create the placeholder for the loop
+board = st.empty()
+last_signal_time = 0
 
-                st.line_chart(prices[-100:])
+# Infinite Loop (Runs as long as the page is 'viewed' by UptimeRobot)
+while True:
+    prices = asyncio.run(fetch_data())
+    
+    with board.container():
+        if len(prices) > 100:
+            engine = SyntheticMathEngine(prices)
+            state, z, er, p = engine.analyze_market_state()
+            
+            # STATUS
+            st.markdown(f"## STATUS: :{state['color']}[{state['status']}]")
+            
+            # METRICS
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Z-Score", f"{z:.2f}", delta="Trigger -2.0")
+            c2.metric("Efficiency", f"{er:.2f}", delta="Filter 0.4")
+            c3.metric("Price", f"{p:.2f}")
+            st.divider()
+            
+            # SIGNAL LOGIC
+            if state["signal"]:
+                st.error("⚡ **OPPORTUNITY DETECTED**")
+                
+                b_col, s_col = st.columns(2)
+                with b_col:
+                    st.info("🔵 **BUY STOP**")
+                    st.code(f"Entry: {state['buy_entry']:.2f}\nSL:    {state['buy_sl']:.2f}\nTP:    {state['buy_tp']:.2f}")
+                with s_col:
+                    st.warning("🔴 **SELL STOP**")
+                    st.code(f"Entry: {state['sell_entry']:.2f}\nSL:    {state['sell_sl']:.2f}\nTP:    {state['sell_tp']:.2f}")
+                
+                import time
+                if time.time() - last_signal_time > 300: 
+                    # 1. Send Discord
+                    send_discord_alert(state, SYMBOL)
+                    
+                    # 2. Log to File
+                    log_msg = f"SIGNAL FIRED | Price: {p} | Buy: {state['buy_entry']:.2f} | Sell: {state['sell_entry']:.2f} | Z: {z:.2f}"
+                    log_to_file(log_msg)
+                    
+                    st.toast("Signal Logged to bot_history.log")
+                    last_signal_time = time.time()
+            
+            elif state["status"] == "⚠️ PRE-SQUEEZE":
+                st.warning(f"**Watchlist:** {state['message']}")
             else:
-                st.warning("Fetching Data...")
-        
-        asyncio.run(asyncio.sleep(3))
+                st.info("Scanning... (Auto-Pilot Active)")
+
+            st.line_chart(prices[-100:])
+        else:
+            st.warning("Fetching Data...")
+    
+    # Sleep to prevent CPU overload
+    asyncio.run(asyncio.sleep(3))
