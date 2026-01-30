@@ -9,19 +9,14 @@ import os
 
 # --- CONFIGURATION ---
 APP_ID = 1089
-# THE SURVIVORS LIST (Only assets that passed the Stress Test)
-SYMBOLS = ['R_75', '1HZ25V', '1HZ50V'] 
+SYMBOLS = ['R_75', '1HZ25V', '1HZ50V'] # The Survivors
 
-# RISK MANAGEMENT
-RISK_PCT = 0.05       # 5% Risk per trade
-MAX_OPEN_TRADES = 3   # Don't over-leverage
-
-# STRATEGY SETTINGS (Diamond)
+# RISK & STRATEGY
+RISK_PCT = 0.05       
 Z_TRIGGER = -2.0
 ER_FILTER = 0.4
-SL_ATR_MULT = 3.0     # Initial Stop
-TP_ATR_MULT = 9.0     # Ultimate Target (if trail doesn't catch it)
-TRAIL_TRIGGER = 3.0   # Move to BE after 3x ATR profit
+SL_ATR_MULT = 3.0     
+TP_ATR_MULT = 9.0     
 
 # SECRET MANAGEMENT
 try:
@@ -29,7 +24,22 @@ try:
 except:
     DISCORD_WEBHOOK_URL = "PASTE_LOCAL_WEBHOOK_FOR_TESTING"
 
-# --- LOGGING ENGINE ---
+# --- NOTIFICATION ENGINE ---
+def send_discord_msg(title, description, color):
+    """Generic Discord Embed Sender"""
+    if "http" not in DISCORD_WEBHOOK_URL: return
+    
+    msg = {
+        "embeds": [{
+            "title": title,
+            "description": description,
+            "color": color, # Decimal color code
+            "timestamp": datetime.now().isoformat()
+        }]
+    }
+    try: requests.post(DISCORD_WEBHOOK_URL, json=msg)
+    except: pass
+
 def log_to_file(msg):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
@@ -72,19 +82,12 @@ class SyntheticMathEngine:
         if z < Z_TRIGGER and er > ER_FILTER:
             signal = True
             
-        return {
-            "signal": signal,
-            "z": z,
-            "er": er,
-            "price": price,
-            "atr": atr
-        }
+        return {"signal": signal, "z": z, "er": er, "price": price, "atr": atr}
 
 # --- UTILS ---
 async def fetch_data(symbol):
     api = DerivAPI(app_id=APP_ID)
     try:
-        # Note: 1HZ indices need granular tick data, fetching candles is safer
         ticks = await api.ticks_history({'ticks_history': symbol, 'count': 3000, 'end': 'latest', 'style': 'candles', 'granularity': 60})
         if 'candles' in ticks: 
             return [float(t['close']) for t in ticks['candles']]
@@ -92,90 +95,85 @@ async def fetch_data(symbol):
     except: return []
     finally: await api.clear()
 
-def send_alert(symbol, data, side, entry, sl, tp, risk_usd):
-    if "http" not in DISCORD_WEBHOOK_URL: return
-    
-    color = 5763719 if side == "BUY" else 15548997
-    msg = {
-        "content": f"🚨 **HEDGE FUND SIGNAL: {symbol}**",
-        "embeds": [{
-            "title": f"{side} ENTRY DETECTED",
-            "color": color,
-            "fields": [
-                {"name": "Entry Price", "value": f"{entry:.4f}", "inline": True},
-                {"name": "Risk (5%)", "value": f"${risk_usd:.2f}", "inline": True},
-                {"name": "Stop Loss", "value": f"{sl:.4f}", "inline": True},
-                {"name": "Take Profit", "value": f"{tp:.4f}", "inline": True},
-                {"name": "Trailing Logic", "value": "Active > 3 ATR", "inline": False}
-            ],
-            "footer": {"text": f"Z-Score: {data['z']:.2f} | ER: {data['er']:.2f}"}
-        }]
-    }
-    try: requests.post(DISCORD_WEBHOOK_URL, json=msg)
-    except: pass
+# --- MAIN APP ---
+st.set_page_config(page_title="Quantum HQ", layout="wide")
+st.title("🏦 Quantum Hedge Fund: Active Sentinel")
 
-# --- DASHBOARD ---
-st.set_page_config(page_title="Quantum Hedge Fund", layout="wide")
-st.title("🏦 Quantum Hedge Fund: Multi-Asset Sentinel")
-
-# Initialize Session State for 'Last Trade Time' per symbol to avoid spam
-if "last_trades" not in st.session_state:
+# 1. STARTUP CHECK (Sends Discord msg only on server restart)
+if "bot_active" not in st.session_state:
+    st.session_state.bot_active = True
     st.session_state.last_trades = {sym: 0 for sym in SYMBOLS}
-
-# Sidebar Configuration
-st.sidebar.header("Fund Controls")
-equity = st.sidebar.number_input("Current Account Equity ($)", value=1000, step=100)
-risk_amt = equity * RISK_PCT
-st.sidebar.write(f"**Risk per Trade:** ${risk_amt:.2f}")
-
-# Main Loop
-if st.checkbox("Active Trading System", value=True):
-    status_cols = st.columns(len(SYMBOLS))
-    charts = {sym: st.empty() for sym in SYMBOLS}
     
-    while True:
-        for i, sym in enumerate(SYMBOLS):
-            prices = asyncio.run(fetch_data(sym))
-            
-            with status_cols[i]:
-                if len(prices) > 100:
-                    engine = SyntheticMathEngine(prices)
-                    data = engine.analyze()
-                    
-                    # Display Live Stats
-                    st.metric(f"{sym}", f"{data['price']:.2f}", f"Z: {data['z']:.2f}")
-                    
-                    # Signal Logic
-                    if data['signal']:
-                        # Cooldown Check (5 mins)
-                        import time
-                        if time.time() - st.session_state.last_trades[sym] > 300:
-                            
-                            # Calc Levels
-                            atr = data['atr']
-                            buy_entry = data['price'] + (atr*0.5)
-                            buy_sl = buy_entry - (atr*SL_ATR_MULT)
-                            buy_tp = buy_entry + (atr*TP_ATR_MULT)
-                            
-                            sell_entry = data['price'] - (atr*0.5)
-                            sell_sl = sell_entry + (atr*SL_ATR_MULT)
-                            sell_tp = sell_entry - (atr*TP_ATR_MULT)
-                            
-                            # Log & Alert
-                            log_msg = f"{sym} SIGNAL | Z:{data['z']:.2f} | Buy: {buy_entry} | Sell: {sell_entry}"
-                            log_to_file(log_msg)
-                            
-                            # Send Buy Alert
-                            send_alert(sym, data, "BUY", buy_entry, buy_sl, buy_tp, risk_amt)
-                            # Send Sell Alert
-                            send_alert(sym, data, "SELL", sell_entry, sell_sl, sell_tp, risk_amt)
-                            
-                            st.toast(f"🚨 Signal Sent for {sym}!")
-                            st.session_state.last_trades[sym] = time.time()
-                    
-                    # Mini Chart
-                    charts[sym].line_chart(prices[-50:], height=150)
-                else:
-                    st.warning(f"Loading {sym}...")
+    startup_msg = (
+        f"**Assets:** {', '.join(SYMBOLS)}\n"
+        f"**Strategy:** Diamond (Z < -2.0)\n"
+        f"**Risk:** {RISK_PCT*100}% per trade\n"
+        f"**Targets:** SL 3.0 ATR | TP 9.0 ATR"
+    )
+    send_discord_msg("🟢 SYSTEM ONLINE", startup_msg, 3066993) # Green
+
+# 2. UI SIDEBAR
+st.sidebar.header("Fund Controls")
+equity = st.sidebar.number_input("Equity ($)", value=1000, step=100)
+risk_amt = equity * RISK_PCT
+st.sidebar.metric("Risk Amount", f"${risk_amt:.2f}")
+
+# 3. MAIN LOOP (Auto-Runs)
+status_cols = st.columns(len(SYMBOLS))
+charts = {sym: st.empty() for sym in SYMBOLS}
+st.write("---")
+st.caption("System is scanning. Do not close this tab if running locally.")
+
+while True:
+    for i, sym in enumerate(SYMBOLS):
+        prices = asyncio.run(fetch_data(sym))
         
-        asyncio.run(asyncio.sleep(5)) # Scan cycle
+        with status_cols[i]:
+            if len(prices) > 100:
+                engine = SyntheticMathEngine(prices)
+                data = engine.analyze()
+                
+                # Live Display
+                st.metric(f"{sym}", f"{data['price']:.2f}", f"Z: {data['z']:.2f}")
+                
+                # SIGNAL LOGIC
+                if data['signal']:
+                    # 5 Minute Cooldown per asset
+                    import time
+                    if time.time() - st.session_state.last_trades[sym] > 300:
+                        
+                        atr = data['atr']
+                        # Buy Params
+                        b_entry = data['price'] + (atr*0.5)
+                        b_sl = b_entry - (atr*SL_ATR_MULT)
+                        b_tp = b_entry + (atr*TP_ATR_MULT)
+                        
+                        # Sell Params
+                        s_entry = data['price'] - (atr*0.5)
+                        s_sl = s_entry + (atr*SL_ATR_MULT)
+                        s_tp = s_entry - (atr*TP_ATR_MULT)
+                        
+                        # DISCORD ALERT
+                        fields_desc = (
+                            f"**BUY STOP:** {b_entry:.4f}\n"
+                            f"SL: {b_sl:.4f} | TP: {b_tp:.4f}\n"
+                            f"----------------\n"
+                            f"**SELL STOP:** {s_entry:.4f}\n"
+                            f"SL: {s_sl:.4f} | TP: {s_tp:.4f}"
+                        )
+                        send_discord_msg(f"🚨 SIGNAL: {sym}", fields_desc, 15158332) # Red
+                        
+                        # Log
+                        log_to_file(f"{sym} SIGNAL | Z:{data['z']:.2f}")
+                        st.toast(f"Signal sent for {sym}")
+                        
+                        # Update Cooldown
+                        st.session_state.last_trades[sym] = time.time()
+                
+                # Chart
+                charts[sym].line_chart(prices[-50:], height=150)
+            else:
+                st.warning(f"Connecting to {sym}...")
+    
+    # 5 second heartbeat
+    asyncio.run(asyncio.sleep(5))
